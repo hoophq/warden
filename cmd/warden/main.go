@@ -1,13 +1,16 @@
 // Warden: author, test and enforce-check Hoop guardrail rules.
 //
-//	warden test <file>...   validate rule files against their own examples (CI)
-//	warden generate         draft a rule with an LLM, proven before it lands
-//	warden scan [file]      detect PII in sample query output via Alcatraz
+//	warden test <file>...       validate rule files against their own examples (CI)
+//	warden check <file> [q...]  probe ad-hoc queries against a rule file
+//	warden generate             draft a rule with an LLM, proven before it lands
+//	warden export <file>        curl that ships the rule to Hoop as a guardrail
+//	warden scan [file]          detect PII in sample query output via Alcatraz
 //
 // The builder UI lives at https://hoop.dev/labs/warden. The binary is CLI-only.
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/hoophq/alcatraz/analyzer"
+	"github.com/hoophq/warden/pkg/export"
 	"github.com/hoophq/warden/pkg/generate"
 	"github.com/hoophq/warden/pkg/match"
 	"github.com/hoophq/warden/pkg/rules"
@@ -39,15 +43,26 @@ Usage:
                                      Detect PII in sample query output with
                                      Alcatraz (stdin when no file is given).
                                      -custom adds your own recognizers.
+  warden check <rule.yaml> [query ...]
+                                     Probe ad-hoc queries against a rule file:
+                                     one verdict per query (stdin, one query
+                                     per line, when none are given). Exits 3
+                                     when any query would be blocked.
   warden generate -block "intent" [-query q] [-allow-query q] [-o rule.yaml]
                                      Draft a rule with an LLM (claude -p by
                                      default; override with -llm-cmd) and
                                      validate it against its own examples
                                      until every one behaves.
+  warden export <rule.yaml>          Print a ready-to-run curl that creates
+                                     the rule as a Hoop guardrail, reading
+                                     api_url and token from a logged-in hoop
+                                     CLI. Pipe to sh to ship it:
+                                     warden export rule.yaml | sh
 
 The builder UI lives at https://hoop.dev/labs/warden; it is not served by
-this binary. test and scan run locally; nothing is sent anywhere. generate
-sends the intent and the sample queries to the LLM command you configure.
+this binary. test, check and scan run locally; nothing is sent anywhere.
+generate sends the intent and the sample queries to the LLM command you
+configure. export only prints the curl; nothing is sent until you run it.
 `
 
 func main() {
@@ -58,10 +73,14 @@ func main() {
 	switch os.Args[1] {
 	case "test":
 		cmdTest(os.Args[2:])
+	case "check":
+		cmdCheck(os.Args[2:])
 	case "scan":
 		cmdScan(os.Args[2:])
 	case "generate":
 		cmdGenerate(os.Args[2:])
+	case "export":
+		cmdExport(os.Args[2:])
 	case "version", "-version", "--version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
@@ -181,6 +200,102 @@ func cmdTest(args []string) {
 	if !report.Pass {
 		os.Exit(1)
 	}
+}
+
+// cmdCheck probes ad-hoc queries against a rule file: the queries you did not
+// think to commit as examples. Verdicts print one per query; exit code 3 means
+// at least one query would be blocked, mirroring scan's "found something" code.
+func cmdCheck(args []string) {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "usage: warden check <rule.yaml> [query ...]  (stdin, one query per line, when no queries are given)")
+		os.Exit(2)
+	}
+
+	rf, err := rules.Load(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	blockedCount := 0
+	totalCount := 0
+	checkQuery := func(q string) {
+		blocked, err := match.Blocked(rf, q)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		totalCount++
+		if blocked {
+			blockedCount++
+			fmt.Printf("BLOCK  %s\n", q)
+		} else {
+			fmt.Printf("allow  %s\n", q)
+		}
+	}
+
+	queries := fs.Args()[1:]
+	if len(queries) == 0 {
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				if q := strings.TrimSpace(line); q != "" {
+					checkQuery(q)
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					fmt.Fprintf(os.Stderr, "error: %v\n", err)
+					os.Exit(1)
+				}
+				break
+			}
+		}
+	} else {
+		for _, q := range queries {
+			checkQuery(q)
+		}
+	}
+	if totalCount == 0 {
+		fmt.Fprintln(os.Stderr, "no queries to check")
+		os.Exit(2)
+	}
+
+	fmt.Printf("\n%d of %d queries blocked by %s\n", blockedCount, totalCount, rf.Name)
+	if blockedCount > 0 {
+		if rf.Message != "" {
+			fmt.Printf("message shown on block: %s\n", rf.Message)
+		}
+		os.Exit(3)
+	}
+}
+
+// cmdExport prints the curl that creates the rule as a Hoop guardrail. It
+// never sends anything itself; pipe to sh when you mean it.
+func cmdExport(args []string) {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: warden export <rule.yaml>")
+		os.Exit(2)
+	}
+
+	rf, err := rules.Load(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cmd, err := export.Curl(rf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(cmd)
+	fmt.Fprintln(os.Stderr, "\nRequires a logged-in hoop CLI (hoop login). Run it with:")
+	fmt.Fprintf(os.Stderr, "  warden export %s | sh\n", fs.Arg(0))
 }
 
 // multiFlag collects a repeatable string flag.
