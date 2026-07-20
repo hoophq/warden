@@ -61,23 +61,37 @@ Install with Homebrew, or build from source (`make build`, Go only, no npm):
 brew install hoophq/tap/warden
 ```
 
-Three commands:
+Five commands:
 
 ```bash
 warden test examples/update-no-where.yaml   # CI: prove rules on their examples
+warden check rule.yaml "DELETE FROM users;" # probe ad-hoc queries against a rule
 warden scan -custom pack.yaml results.csv   # PII detection over sample output
 warden generate -block "DELETE without WHERE" \
   -query "DELETE FROM users;" -o rule.yaml   # LLM drafts, warden proves
+warden export rule.yaml | sh                 # ship the rule to Hoop as a guardrail
 ```
 
 - **`warden test`** loads Warden rule files (rules plus `must_block` and `must_allow`
   examples) and exits non-zero on any false positive or negative. Commit rules to git,
   run this in CI, and guardrails become code. `-json` emits each example's verdict as
   structured data.
+- **`warden check`** answers "would this query be blocked?" for queries you did not
+  commit as examples: pass them as arguments or pipe them in one per line. Exit code 3
+  means at least one query was blocked, so it doubles as a shell gate.
+- **`warden export`** prints the same ready-to-run curl the builder exports: the
+  `POST /api/guardrails` payload with credentials read from a logged-in hoop CLI. It
+  only prints; pipe to `sh` to actually create the guardrail.
 - **`warden scan`** runs [Alcatraz](https://github.com/hoophq/alcatraz) in-process over
   sample query output: 45 entity types, checksum-verified (Luhn, CPF mod-11), zero
   network. `-custom` adds your own recognizers from YAML (see
   `examples/custom-recognizers.yaml`). Exit code 3 means PII was found.
+
+The generate-to-enforce loop is one pipe away:
+
+```bash
+warden generate -block "UPDATE without WHERE" -o rule.yaml && warden export rule.yaml | sh
+```
 
 ## Generating rules with an LLM
 
@@ -149,6 +163,6 @@ make test      # go test ./...
 ```
 
 Layout: `pkg/rules` is the rule-file schema, `pkg/match` the gateway-parity matcher,
-`pkg/generate` the LLM generate-validate loop, `pkg/scan` the Alcatraz wiring, and
-`cmd/warden` the CLI. The builder UI lives in the hoop.dev landing-page repo and is
+`pkg/generate` the LLM generate-validate loop, `pkg/export` the Hoop API payload and
+curl rendering, `pkg/scan` the Alcatraz wiring, and `cmd/warden` the CLI. The builder UI lives in the hoop.dev landing-page repo and is
 served at [hoop.dev/labs/warden](https://hoop.dev/labs/warden).
