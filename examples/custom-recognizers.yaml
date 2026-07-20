@@ -1,0 +1,14 @@
+# Custom Alcatraz recognizers for `warden scan -custom <this-file>`.
+# Adds detections Alcatraz doesn't ship: your own ID formats, ticket
+# numbers, internal tokens.
+custom_recognizers:
+  - name: "employee-id"
+    entity: "EMPLOYEE_ID"
+    patterns:
+      - regex: "\\bEMP-\\d{6}\\b"
+        score: 0.8
+  - name: "internal-api-key"
+    entity: "INTERNAL_API_KEY"
+    patterns:
+      - regex: "\\bik_[A-Za-z0-9]{24}\\b"
+        score: 0.9

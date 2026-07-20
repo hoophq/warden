@@ -1,0 +1,120 @@
+name: Publish to Homebrew
+
+# Auto Release creates the vX.Y.Z tag/release with GITHUB_TOKEN, and a tag pushed
+# by GITHUB_TOKEN cannot start a `push: tags` workflow. So this chains off Auto
+# Release's completion: it uploads the brew archives to that release and commits
+# the formula to hoophq/homebrew-tap (the shared tap), so users can
+# `brew install hoophq/tap/warden`.
+on:
+  workflow_run:
+    workflows: ["Auto Release"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+# Serialize runs: back-to-back releases would otherwise race on pushing the
+# formula commit to the tap.
+concurrency:
+  group: brew-publish
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    # Auto Release runs on every push to main; act only on successful runs.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      publish: ${{ steps.tag.outputs.publish }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The exact commit Auto Release ran on. fetch-depth: 0 brings the tags
+          # so we can read the version tag it created at that commit.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Find the release tag at this commit
+        id: tag
+        run: |
+          set -euo pipefail
+          # Auto Release tags the released commit vX.Y.Z, or tags nothing for a
+          # skip-release PR or a direct push. Bind the published version to that
+          # tag so the source and the version always match, and skip when there
+          # is no tag.
+          TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$TAG" ]; then
+            echo "No release tag at ${{ github.event.workflow_run.head_sha }}; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+            echo "Publishing ${TAG}"
+          fi
+
+  homebrew:
+    name: Build archives & update tap
+    needs: resolve
+    if: ${{ needs.resolve.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cross-compile, package archives, render formula
+        run: node homebrew/build.mjs "${{ needs.resolve.outputs.version }}"
+
+      - name: Attach archives to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # --clobber lets a re-run replace assets instead of failing on
+          # "asset already exists".
+          gh release upload "$TAG" homebrew/dist/*.tar.gz homebrew/dist/checksums.txt \
+            --clobber --repo "${{ github.repository }}"
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          # A cross-repo push needs a token with write access to the tap; the
+          # default GITHUB_TOKEN is scoped to this repo only. Same secret the
+          # other hoophq repos use for their tap publishes.
+          repository: hoophq/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update and push the formula
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Formula
+          cp homebrew/dist/warden.rb tap/Formula/warden.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/warden.rb
+          # A re-run produces identical archives and checksums, so there may be
+          # nothing to commit.
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for v${VERSION}; nothing to push."
+          else
+            git commit -m "warden ${VERSION}"
+            # The tap may have moved since checkout (e.g. another release
+            # landing); rebase our formula commit on top instead of failing.
+            git pull --rebase origin main
+            git push origin main
+          fi

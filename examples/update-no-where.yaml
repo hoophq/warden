@@ -1,0 +1,20 @@
+# Warden rule file. Validate with: warden test examples/update-no-where.yaml
+name: "update-no-where"
+description: "Block UPDATE statements that have no WHERE clause (strict complement pattern)"
+message: "UPDATE without a WHERE clause is blocked."
+rules:
+  - type: "pattern_match"
+    # Go RE2 (what hoop's gateway compiles): machine-generated complement,
+    # matches any UPDATE in which the word WHERE never appears.
+    pattern_regex: "(?is)^\\s*update\\s+(?:(?:h|e|r|[^wher]|w(?:(?:w|h(?:w|e(?:w|rw))))*(?:e|r|[^wher]|h(?:h|r|[^wher]|e(?:h|e|[^wher]|r(?:h|r|[^wher]))))))*(?:w(?:(?:w|h(?:w|e(?:w|rw))))*(?:h(?:e(?:r)?)?)?)?$"
+    # Python re (Presidio deployments): same intent, expressed with lookahead.
+    pattern_regex_python: "(?is)^\\s*update\\s+(?!.*\\bwhere\\b)"
+examples:
+  must_block:
+    - "update orders set status = 'called'"
+    - "UPDATE stats SET total = total + 1;"
+    - "UPDATE public.users SET role = 'admin', active = true"
+  must_allow:
+    - "update orders set status = 'called' where status = 'out'"
+    - "UPDATE orders SET status = 'shipped' WHERE id = 42;"
+    - "SELECT * FROM orders WHERE id = 1"
