@@ -219,32 +219,15 @@ func cmdCheck(args []string) {
 		os.Exit(1)
 	}
 
-	queries := fs.Args()[1:]
-	if len(queries) == 0 {
-		sc := bufio.NewScanner(os.Stdin)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			if q := strings.TrimSpace(sc.Text()); q != "" {
-				queries = append(queries, q)
-			}
-		}
-		if err := sc.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-	}
-	if len(queries) == 0 {
-		fmt.Fprintln(os.Stderr, "no queries to check")
-		os.Exit(2)
-	}
-
 	blockedCount := 0
-	for _, q := range queries {
+	totalCount := 0
+	checkQuery := func(q string) {
 		blocked, err := match.Blocked(rf, q)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+		totalCount++
 		if blocked {
 			blockedCount++
 			fmt.Printf("BLOCK  %s\n", q)
@@ -252,7 +235,36 @@ func cmdCheck(args []string) {
 			fmt.Printf("allow  %s\n", q)
 		}
 	}
-	fmt.Printf("\n%d of %d queries blocked by %s\n", blockedCount, len(queries), rf.Name)
+
+	queries := fs.Args()[1:]
+	if len(queries) == 0 {
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				if q := strings.TrimSpace(line); q != "" {
+					checkQuery(q)
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					fmt.Fprintf(os.Stderr, "error: %v\n", err)
+					os.Exit(1)
+				}
+				break
+			}
+		}
+	} else {
+		for _, q := range queries {
+			checkQuery(q)
+		}
+	}
+	if totalCount == 0 {
+		fmt.Fprintln(os.Stderr, "no queries to check")
+		os.Exit(2)
+	}
+
+	fmt.Printf("\n%d of %d queries blocked by %s\n", blockedCount, totalCount, rf.Name)
 	if blockedCount > 0 {
 		if rf.Message != "" {
 			fmt.Printf("message shown on block: %s\n", rf.Message)
