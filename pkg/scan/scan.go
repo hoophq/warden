@@ -78,9 +78,9 @@ func NewEngine(customPath string) (*analyzer.Engine, error) {
 
 // Finding is an aggregated detection for reporting.
 type Finding struct {
-	Entity  string
-	Count   int
-	Samples []string // masked
+	Entity   string
+	Count    int
+	Samples  []string // masked
 	MaxScore float64
 }
 

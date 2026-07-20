@@ -1,4 +1,4 @@
-.PHONY: all build test clean
+.PHONY: all build test builder clean
 
 all: build
 
@@ -9,6 +9,10 @@ build:
 
 test:
 	go test ./...
+
+# The web builder, in the default browser.
+builder:
+	open https://hoop.dev/labs/warden
 
 clean:
 	rm -rf warden
